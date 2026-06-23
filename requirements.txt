@@ -1,2 +1,6 @@
-pygame>=2.5
+# pygame-ce is the community-maintained fork of pygame and a drop-in
+# replacement (still imported as `pygame`). It ships prebuilt wheels for new
+# Python versions sooner, so installs don't try to compile from source.
+# If you prefer the original, `pygame>=2.5` also works on Python <= 3.13.
+pygame-ce>=2.5
 numpy>=1.24  # optional: enables synthesized sound effects
