@@ -41,6 +41,20 @@ def darken(color, amount=60):
     return tuple(max(0, ch - amount) for ch in color)
 
 
+def draw_star(surf, cx, cy, r, filled=True):
+    pts = []
+    for i in range(10):
+        a = -math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * 0.45
+        pts.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
+    if filled:
+        pygame.draw.polygon(surf, GOLD, pts)
+        pygame.draw.polygon(surf, lighten(GOLD, 20), pts, 1)
+    else:
+        pygame.draw.polygon(surf, (70, 60, 95), pts)
+        pygame.draw.polygon(surf, (110, 95, 150), pts, 2)
+
+
 # ---------------------------------------------------------------------------
 # Optional synthesized sound effects (no asset files needed).
 # ---------------------------------------------------------------------------
@@ -48,6 +62,7 @@ def darken(color, amount=60):
 class Sounds:
     def __init__(self):
         self.enabled = False
+        self.muted = False
         try:
             import numpy as np
             pygame.mixer.init(frequency=22050, size=-16, channels=2)
@@ -87,7 +102,7 @@ class Sounds:
         return pygame.sndarray.make_sound(np.column_stack([samples, samples]).copy())
 
     def play(self, name):
-        if self.enabled and name in self._cache:
+        if self.enabled and not self.muted and name in self._cache:
             self._cache[name].play()
 
 
@@ -268,7 +283,10 @@ class Game:
         self.sounds = Sounds()
         self.bg = self._make_background()
         self.save = self._load_save()
+        self.sounds.muted = bool(self.save.get("muted", False))
         self.scene = "menu"        # menu | play
+        self.show_help = False
+        self.earned_stars = 0
         self.state: GameState | None = None
         self.level_index = 0
         # play-scene visual state
@@ -289,11 +307,24 @@ class Game:
     # -- persistence --------------------------------------------------------
 
     def _load_save(self):
+        data = {"completed": [], "best": {}, "stars": {}, "muted": False}
         try:
             with open(SAVE_FILE) as f:
-                return json.load(f)
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data.update(loaded)
         except Exception:
-            return {"completed": [], "best": {}}
+            pass
+        return data
+
+    def _unlocked(self, index):
+        """A level is playable once the previous one has been completed."""
+        return index == 0 or LEVELS[index - 1].number in self.save["completed"]
+
+    @staticmethod
+    def _stars_for(moves_left, total_moves):
+        ratio = moves_left / total_moves if total_moves else 0
+        return 3 if ratio >= 0.4 else 2 if ratio >= 0.15 else 1
 
     def _write_save(self):
         try:
@@ -342,6 +373,7 @@ class Game:
         self.hint = None
         self.idle_time = 0.0
         self.end_timer = 0.0
+        self.earned_stars = 0
         self.banner = (f"Level {LEVELS[index].number}", 1.2)
         self._sync_visuals()
 
@@ -380,15 +412,43 @@ class Game:
         else:
             self._play_event(ev)
 
+    def _help_button_rect(self):
+        return pygame.Rect(WIDTH // 2 - 110, 620, 220, 56)
+
+    def _mute_button_rect(self):
+        return pygame.Rect(WIDTH - 76, 28, 48, 48)
+
+    def _toggle_mute(self):
+        self.sounds.muted = not self.sounds.muted
+        self.save["muted"] = self.sounds.muted
+        self._write_save()
+
     def _menu_event(self, ev):
-        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-            for i in range(len(LEVELS)):
-                if self._level_button_rect(i).collidepoint(ev.pos):
-                    self.start_level(i)
-                    return
         if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
-            pygame.quit()
-            sys.exit()
+            if self.show_help:
+                self.show_help = False
+            else:
+                pygame.quit()
+                sys.exit()
+            return
+        if ev.type != pygame.MOUSEBUTTONDOWN or ev.button != 1:
+            return
+        if self.show_help:
+            self.show_help = False
+            return
+        if self._mute_button_rect().collidepoint(ev.pos):
+            self._toggle_mute()
+            return
+        if self._help_button_rect().collidepoint(ev.pos):
+            self.show_help = True
+            return
+        for i in range(len(LEVELS)):
+            if self._level_button_rect(i).collidepoint(ev.pos):
+                if self._unlocked(i):
+                    self.start_level(i)
+                else:
+                    self.sounds.play("lose")
+                return
 
     def _play_event(self, ev):
         if ev.type == pygame.KEYDOWN:
@@ -396,6 +456,8 @@ class Game:
                 self.scene = "menu"
             elif ev.key == pygame.K_r:
                 self.start_level(self.level_index)
+            elif ev.key == pygame.K_m:
+                self._toggle_mute()
             return
         if self.state.over and not self.phases:
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1 and self.end_timer > 0.6:
@@ -514,8 +576,13 @@ class Game:
                 self.save["completed"].append(num)
             best = self.save["best"].get(str(num), 0)
             self.save["best"][str(num)] = max(best, self.state.score)
+            self.earned_stars = self._stars_for(self.state.moves_left,
+                                                self.state.level.moves)
+            prev_stars = self.save["stars"].get(str(num), 0)
+            self.save["stars"][str(num)] = max(prev_stars, self.earned_stars)
             self._write_save()
         else:
+            self.earned_stars = 0
             self.sounds.play("lose")
 
     def _finish_phase(self, phase):
@@ -605,20 +672,112 @@ class Game:
         for i, lvl in enumerate(LEVELS):
             rect = self._level_button_rect(i)
             done = lvl.number in self.save["completed"]
-            hover = rect.collidepoint(mouse)
-            base = (90, 70, 150) if not done else (60, 130, 90)
+            unlocked = self._unlocked(i)
+            hover = rect.collidepoint(mouse) and unlocked
+            if not unlocked:
+                base = (55, 48, 78)
+            elif done:
+                base = (60, 130, 90)
+            else:
+                base = (90, 70, 150)
             pygame.draw.rect(self.screen, lighten(base, 25) if hover else base, rect,
                              border_radius=14)
             pygame.draw.rect(self.screen, GOLD if done else (140, 120, 200), rect, 3,
                              border_radius=14)
+            if not unlocked:
+                self._draw_lock(rect.centerx, rect.centery - 4)
+                continue
             num = self.font_big.render(str(lvl.number), True, WHITE)
-            self.screen.blit(num, num.get_rect(center=(rect.centerx, rect.centery - 12)))
+            self.screen.blit(num, num.get_rect(center=(rect.centerx, rect.centery - 18)))
+            stars = self.save["stars"].get(str(lvl.number), 0)
+            for s in range(3):
+                draw_star(self.screen, rect.centerx + (s - 1) * 30, rect.centery + 22,
+                          12, filled=s < stars)
             best = self.save["best"].get(str(lvl.number))
-            tag = f"Best {best}" if best else f"{lvl.moves} moves"
+            tag = f"Best {best:,}" if best else f"{lvl.moves} moves"
             small = self.font.render(tag, True, (220, 215, 240))
-            self.screen.blit(small, small.get_rect(center=(rect.centerx, rect.bottom - 22)))
+            self.screen.blit(small, small.get_rect(center=(rect.centerx, rect.bottom - 16)))
+
+        help_rect = self._help_button_rect()
+        h_hover = help_rect.collidepoint(mouse)
+        pygame.draw.rect(self.screen, (90, 70, 150) if not h_hover else (110, 88, 175),
+                         help_rect, border_radius=14)
+        pygame.draw.rect(self.screen, (150, 130, 210), help_rect, 2, border_radius=14)
+        ht = self.font_med.render("How to Play", True, WHITE)
+        self.screen.blit(ht, ht.get_rect(center=help_rect.center))
+
+        self._draw_mute_button()
         tip = self.font.render("Click a level to play  ·  Esc quits", True, (190, 185, 215))
         self.screen.blit(tip, tip.get_rect(center=(WIDTH // 2, HEIGHT - 60)))
+        if self.show_help:
+            self._draw_help()
+
+    def _draw_lock(self, cx, cy):
+        body = pygame.Rect(0, 0, 34, 26)
+        body.center = (cx, cy + 8)
+        pygame.draw.rect(self.screen, (150, 140, 175), body, border_radius=6)
+        pygame.draw.arc(self.screen, (150, 140, 175),
+                        pygame.Rect(cx - 12, cy - 16, 24, 28), 0.2, math.pi - 0.2, 5)
+        pygame.draw.circle(self.screen, (60, 52, 85), (cx, body.centery), 4)
+
+    def _draw_mute_button(self):
+        rect = self._mute_button_rect()
+        pygame.draw.rect(self.screen, (60, 50, 95), rect, border_radius=10)
+        pygame.draw.rect(self.screen, (150, 130, 210), rect, 2, border_radius=10)
+        cx, cy = rect.center
+        pygame.draw.polygon(self.screen, WHITE,
+                            [(cx - 10, cy - 5), (cx - 4, cy - 5), (cx + 2, cy - 11),
+                             (cx + 2, cy + 11), (cx - 4, cy + 5), (cx - 10, cy + 5)])
+        if self.sounds.muted:
+            pygame.draw.line(self.screen, (255, 110, 100), (cx + 6, cy - 9),
+                             (cx + 14, cy + 9), 3)
+        else:
+            for i in range(2):
+                pygame.draw.arc(self.screen, WHITE,
+                                pygame.Rect(cx + 2, cy - 8 - i * 3, 12 + i * 6, 16 + i * 6),
+                                -0.7, 0.7, 2)
+
+    def _draw_help(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((8, 6, 24, 210))
+        self.screen.blit(overlay, (0, 0))
+        card = pygame.Rect(0, 0, 640, 640)
+        card.center = (WIDTH // 2, HEIGHT // 2)
+        pygame.draw.rect(self.screen, (40, 32, 86), card, border_radius=20)
+        pygame.draw.rect(self.screen, GOLD, card, 4, border_radius=20)
+        title = self.font_big.render("HOW TO PLAY", True, GOLD)
+        self.screen.blit(title, title.get_rect(center=(card.centerx, card.y + 50)))
+        lines = [
+            "Swap two neighbours to line up 3+ of a color.",
+            "Complete the goals before you run out of moves.",
+            "Tap a special to fire it, or swap two for a combo.",
+        ]
+        y = card.y + 100
+        for line in lines:
+            t = self.font.render(line, True, (220, 215, 240))
+            self.screen.blit(t, t.get_rect(center=(card.centerx, y)))
+            y += 30
+        specials = [
+            (Piece(Color.BLUE, Special.ROCKET_H), "Rocket", "Match 4 in a line.",
+             "Clears a whole row or column."),
+            (Piece(Color.PURPLE, Special.PROPELLER), "Propeller", "Match a 2x2 square.",
+             "Hits neighbours and an obstacle."),
+            (Piece(Color.RED, Special.TNT), "TNT", "Match an L or T of 5.",
+             "Explodes a wide radius."),
+            (Piece(None, Special.LIGHT_BALL), "Light Ball", "Match 5 in a line.",
+             "Clears every piece of one color."),
+        ]
+        y = card.y + 210
+        for piece, name, how, effect in specials:
+            draw_piece(self.screen, piece, card.x + 40, y - CELL // 2 + 14, CELL)
+            n = self.font_med.render(name, True, GOLD)
+            self.screen.blit(n, (card.x + 120, y - 26))
+            d = self.font.render(f"{how}  {effect}", True, (215, 210, 235))
+            self.screen.blit(d, (card.x + 120, y + 6))
+            y += 86
+        close = self.font.render("Click anywhere or press Esc to close",
+                                 True, (180, 175, 210))
+        self.screen.blit(close, close.get_rect(center=(card.centerx, card.bottom - 30)))
 
     def _draw_play(self):
         self._draw_hud()
@@ -672,8 +831,9 @@ class Game:
             name = self.font.render(goal.label(), True, (200, 195, 225))
             self.screen.blit(name, name.get_rect(midbottom=(rect.centerx, rect.bottom - 6)))
             x += 132
-        hint = self.font.render("Esc: menu   R: restart   Tap a special to fire it",
-                                True, (170, 165, 200))
+        mute_txt = "M: unmute" if self.sounds.muted else "M: mute"
+        hint = self.font.render(f"Esc: menu   R: restart   {mute_txt}   "
+                                "Tap a special to fire it", True, (170, 165, 200))
         self.screen.blit(hint, (24, 100))
 
     def _draw_board(self):
@@ -770,28 +930,42 @@ class Game:
         return moving, offsets, scales
 
     def _draw_endcard(self):
+        won = self.state.won
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((10, 8, 30, 170))
         self.screen.blit(overlay, (0, 0))
-        card = pygame.Rect(0, 0, 480, 320)
+        card = pygame.Rect(0, 0, 480, 360 if won else 300)
         card.center = (WIDTH // 2, HEIGHT // 2)
         pygame.draw.rect(self.screen, (45, 35, 95), card, border_radius=20)
-        pygame.draw.rect(self.screen, GOLD if self.state.won else (200, 90, 90),
-                         card, 4, border_radius=20)
-        title = "LEVEL COMPLETE!" if self.state.won else "OUT OF MOVES"
-        t = self.font_big.render(title, True, GOLD if self.state.won else (255, 130, 120))
-        self.screen.blit(t, t.get_rect(center=(card.centerx, card.y + 70)))
-        s = self.font_med.render(f"Score: {self.state.score:,}", True, WHITE)
-        self.screen.blit(s, s.get_rect(center=(card.centerx, card.y + 140)))
-        if self.state.won:
+        pygame.draw.rect(self.screen, GOLD if won else (200, 90, 90), card, 4,
+                         border_radius=20)
+        title = "LEVEL COMPLETE!" if won else "OUT OF MOVES"
+        t = self.font_big.render(title, True, GOLD if won else (255, 130, 120))
+        self.screen.blit(t, t.get_rect(center=(card.centerx, card.y + 55)))
+        if won:
+            # stars pop in one by one as the card settles
+            for s in range(3):
+                appear = self.end_timer > 0.3 + s * 0.25
+                scale = 1.0
+                if appear and self.end_timer < 0.55 + s * 0.25:
+                    scale = 1.4
+                draw_star(self.screen, card.centerx + (s - 1) * 64, card.y + 130,
+                          int(26 * scale), filled=s < self.earned_stars and appear)
+            s = self.font_med.render(f"Score: {self.state.score:,}", True, WHITE)
+            self.screen.blit(s, s.get_rect(center=(card.centerx, card.y + 200)))
             nxt = "Click for next level" if self.level_index + 1 < len(LEVELS) \
                 else "Click for menu — all levels done!"
+            n = self.font.render(nxt, True, (210, 205, 235))
+            self.screen.blit(n, n.get_rect(center=(card.centerx, card.y + 260)))
+            esc = self.font.render("Esc for level select", True, (170, 165, 200))
+            self.screen.blit(esc, esc.get_rect(center=(card.centerx, card.y + 300)))
         else:
-            nxt = "Click to retry"
-        n = self.font.render(nxt, True, (210, 205, 235))
-        self.screen.blit(n, n.get_rect(center=(card.centerx, card.y + 220)))
-        esc = self.font.render("Esc for level select", True, (170, 165, 200))
-        self.screen.blit(esc, esc.get_rect(center=(card.centerx, card.y + 260)))
+            s = self.font_med.render(f"Score: {self.state.score:,}", True, WHITE)
+            self.screen.blit(s, s.get_rect(center=(card.centerx, card.y + 130)))
+            n = self.font.render("Click to retry", True, (210, 205, 235))
+            self.screen.blit(n, n.get_rect(center=(card.centerx, card.y + 200)))
+            esc = self.font.render("Esc for level select", True, (170, 165, 200))
+            self.screen.blit(esc, esc.get_rect(center=(card.centerx, card.y + 240)))
 
     # -- main loop ---------------------------------------------------------------
 

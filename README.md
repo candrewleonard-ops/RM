@@ -43,8 +43,20 @@ the whole board.
   Tough boxes (marked `2`) take two hits.
 - Goals can be: collect N pieces of a color, clear all grass, break boxes.
 
-There are 6 levels of increasing difficulty. Progress and best scores are
-saved to `save.json`.
+## Progression
+
+There are 6 levels of increasing difficulty. Levels unlock one at a time —
+clear the current one to open the next.
+
+- **Stars** — finish a level with moves to spare to earn up to 3 stars
+  (the more moves left, the more stars). Your best star count shows on the
+  level-select screen.
+- Progress, stars, best scores, and your sound preference are saved to
+  `save.json`.
+
+![Level select](docs/menu.png)
+
+A built-in **How to Play** screen (button on the menu) explains every special.
 
 ## Controls
 
@@ -52,6 +64,7 @@ saved to `save.json`.
 |---|---|
 | Left click / drag | Select, swap, tap specials |
 | `R` | Restart level |
+| `M` | Toggle sound on/off |
 | `Esc` | Back to level select / quit |
 
 ## Development
